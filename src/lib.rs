@@ -138,6 +138,10 @@ impl TDigest {
         }
     }
 
+    pub fn raw_centroids(&self) -> &[Centroid] {
+        &self.centroids
+    }
+
     #[inline]
     pub fn mean(&self) -> f64 {
         let count_: f64 = self.count.into_inner();
@@ -437,6 +441,45 @@ impl TDigest {
         result
     }
 
+    /// Given a value estimate the corresponding quantile in a digest
+    pub fn estimate_quantile_at_value(&self, v: f64) -> f64 {
+        if self.centroids.is_empty() {
+            return 0.0;
+        }
+
+        if v < self.min.into_inner() {
+            return 0.0;
+        }
+
+        if v > self.max.into_inner() {
+            return 1.0;
+        }
+
+        let mut low_bound = self.min.into_inner();
+        let mut low_weight = 0.0;
+        let mut hi_bound = self.max.into_inner();
+        let mut hi_weight = 0.0;
+        let mut accum_weight = 0.0;
+
+        for cent in &self.centroids {
+            if v < cent.mean.into_inner() {
+                hi_bound = cent.mean.into_inner();
+                hi_weight = cent.weight.into_inner();
+                break;
+            }
+            low_bound = cent.mean.into_inner();
+            low_weight = cent.weight.into_inner();
+            accum_weight += low_weight;
+        }
+
+        let weighted_midpoint = low_bound + (hi_bound - low_bound) * low_weight / (low_weight + hi_weight);
+        if v > weighted_midpoint {
+            (accum_weight + (v - weighted_midpoint) / (hi_bound - weighted_midpoint) * hi_weight / 2.0) / self.count.into_inner()
+        } else {
+            (accum_weight - (weighted_midpoint - v) / (weighted_midpoint - low_bound) * low_weight / 2.0) / self.count.into_inner()
+        }
+    }
+
     /// To estimate the value located at `q` quantile
     pub fn estimate_quantile(&self, q: f64) -> f64 {
         if self.centroids.is_empty() {
@@ -705,5 +748,30 @@ mod tests {
 
         let percentage: f64 = (expected - ans).abs() / expected;
         assert!(percentage < 0.01);
+    }
+
+    #[test]
+    fn test_quantile_and_value_estimates() {
+        let t = TDigest::new_with_size(100);
+        let values: Vec<f64> = (1..=10000).map(|v| f64::from(v)/100.0).collect();
+
+        let t = t.merge_sorted(values);
+
+        for i in 1..=100 {
+            let value = i as f64;
+            let quantile = value / 100.0;
+
+            let test_value = t.estimate_quantile(quantile);
+            let test_quant = t.estimate_quantile_at_value(value);
+
+            let percentage = (test_value - value).abs() / value;
+            assert!(percentage < 0.01, "Exceeded 1% error on quantile {}: expected {}, received {} (error% {})", quantile, value, test_value, (test_value - value).abs() / value);
+            let percentage = (test_quant - quantile).abs() / quantile;
+            assert!(percentage < 0.01, "Exceeded 1% error on quantile at value {}: expected {}, received {} (error% {})", value, quantile, test_quant, (test_quant - quantile).abs() / quantile);
+
+            let test = t.estimate_quantile_at_value(t.estimate_quantile(quantile));
+            let percentage = (test - quantile).abs() / quantile;
+            assert!(percentage < 0.001);
+        }
     }
 }
